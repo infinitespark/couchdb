@@ -13,6 +13,7 @@
 
 -define(uint2bin(I), binary:encode_unsigned(I, little)).
 -define(bin2uint(I), binary:decode_unsigned(I, little)).
+-define(bin2int(V), binary_to_integer(V)).
 -define(METADATA_VERSION_KEY, <<16#FF, "/metadataVersion">>).
 
 % Prefix Definitions
@@ -81,3 +82,13 @@
 
 
 -define(DEFAULT_BINARY_CHUNK_SIZE, 100000).
+-define(BINARY_CHUNK_SIZE, 100000).
+
+% jobs api
+-define(DB_EXPIRATION_JOB_TYPE, <<"dbexpiration">>).
+-define(DB_EXPIRATION_JOB, <<"dbexpiration_job">>).
+
+% settings for background database expiration deletion
+-define(DEFAULT_RETENTION_SEC, 172800). % 48 hours
+-define(DEFAULT_EXPIRATION_BATCH, 100).
+-define(DEFAULT_SCHEDULE_SEC, 3600). % 1 hour

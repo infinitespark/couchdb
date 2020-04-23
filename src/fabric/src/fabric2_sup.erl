@@ -24,6 +24,9 @@
 ]).
 
 
+-include_lib("fabric/include/fabric2.hrl").
+
+
 start_link(Args) ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, Args).
 
@@ -55,6 +58,14 @@ init([]) ->
             5000,
             worker,
             [fabric2_index]
+        },
+        {
+            fabric2_db_expiration,
+            {fabric2_db_expiration, start_link, []},
+            permanent,
+            5000,
+            worker,
+            [fabric2_db_expiration]
         }
     ],
     ChildrenWithEpi = couch_epi:register_service(fabric2_epi, Children),
