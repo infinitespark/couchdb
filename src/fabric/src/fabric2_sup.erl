@@ -33,7 +33,7 @@ start_link(Args) ->
 
 init([]) ->
     config:enable_feature(fdb),
-    Flags = {one_for_one, 1, 5},
+    Flags = {one_for_all, 1, 1}, % lowered for debugging
     Children = [
         {
             fabric2_server,

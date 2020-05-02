@@ -83,12 +83,3 @@
 
 -define(DEFAULT_BINARY_CHUNK_SIZE, 100000).
 -define(BINARY_CHUNK_SIZE, 100000).
-
-% jobs api
--define(DB_EXPIRATION_JOB_TYPE, <<"dbexpiration">>).
--define(DB_EXPIRATION_JOB, <<"dbexpiration_job">>).
-
-% settings for background database expiration deletion
--define(DEFAULT_RETENTION_SEC, 172800). % 48 hours
--define(DEFAULT_EXPIRATION_BATCH, 100).
--define(DEFAULT_SCHEDULE_SEC, 3600). % 1 hour
