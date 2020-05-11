@@ -18,7 +18,8 @@
 
 -export([
     start_link/0,
-    cleanup/1
+    cleanup/1,
+    delete_dbs/1
 ]).
 
 -export([
@@ -37,9 +38,10 @@
 
 -define(JOB_TYPE, <<"dbexpiration">>).
 -define(JOB_ID, <<"dbexpiration_job">>).
+-define(DEFAULT_JOB_Version, 1).
 -define(DEFAULT_RETENTION_SEC, 172800). % 48 hours
+-define(DEFAULT_SCHEDULE_SEC, 3600). % 1 hour
 -define(DEFAULT_EXPIRATION_BATCH, 100).
--define(DEFAULT_SCHEDULE_SEC, 15). % 1 hour
 -define(ERROR_RESCHEDULE_SEC, 5).
 -define(CHECK_ENABLED_SEC, 2).
 -define(JOB_TIMEOUT_SEC, 30).
@@ -72,13 +74,9 @@ handle_cast(Msg, St) ->
 
 
 handle_info(timeout, #st{job = undefined} = St) ->
-    couch_log:info("~p : got timeout", [?JOB_ID]),
     ok = wait_for_couch_jobs_app(),
     ok = couch_jobs:set_type_timeout(?JOB_TYPE, ?JOB_TIMEOUT_SEC),
-    % for testing
-    couch_jobs:remove(undefined, ?JOB_TYPE, ?JOB_ID),
     ok = maybe_add_job(),
-    couch_log:info("~p : added job ~p, initialized", [?MODULE, ?JOB_ID]),
     Pid = spawn_link(?MODULE, cleanup, [is_enabled()]),
     {noreply, St#st{job = Pid}};
 
@@ -104,45 +102,42 @@ wait_for_couch_jobs_app() ->
     % commits FDB utilities out we can remove this bit of code.
     case lists:keysearch(couch_jobs, 1, application:which_applications()) of
         {value, {couch_jobs, _, _}} ->
-            couch_log:info("~p : couch_jobs started! ", [?MODULE]),
             ok;
         false ->
             timer:sleep(100),
-            couch_log:info("~p : waiting for couch jobs", [?MODULE]),
             wait_for_couch_jobs_app()
     end.
 
 
 maybe_add_job() ->
-    case couch_jobs:get_job_data(undefined, ?JOB_TYPE, ?JOB_ID) of
+    case couch_jobs:get_job_data(undefined, ?JOB_TYPE, job_id()) of
         {error, not_found} ->
             Now = erlang:system_time(second),
-            ok = couch_jobs:add(undefined, ?JOB_TYPE, ?JOB_ID, #{}, Now);
+            ok = couch_jobs:add(undefined, ?JOB_TYPE, job_id(), #{}, Now);
         {ok, _JobData} ->
             ok
     end.
 
 
 cleanup(false) ->
-    couch_log:info("~p : Not enabled waiting ...", [?MODULE]),
     timer:sleep(?CHECK_ENABLED_SEC * 1000),
     exit(normal);
 
 cleanup(true) ->
     Now = erlang:system_time(second),
-    Opts = #{max_sched_time => Now + min(?DEFAULT_SCHEDULE_SEC div 3, 15)},
+    ScheduleSec = schedule_sec(),
+    Opts = #{max_sched_time => Now + min(ScheduleSec div 3, 15)},
     case couch_jobs:accept(?JOB_TYPE, Opts) of
         % maybe handle timeout here, need to check the api
         {ok, Job, Data} ->
             try
-                couch_log:error("~p : processing expirations ~p ~p", [?MODULE, Job, Data]),
                 {ok, Job1, Data1} = process_expirations(Job, Data),
-                couch_log:error("~p : DONE resubmitting job ~p ~p", [?MODULE, Job, schedule_sec()]),
                 ok = resubmit_job(Job1, Data1, schedule_sec())
             catch
                 _Tag:Error ->
                     Stack = erlang:get_stacktrace(),
-                    couch_log:error("~p : processing error ~p ~p ~p", [?MODULE, Job, Error, Stack]),
+                    couch_log:error("~p : processing error ~p ~p ~p",
+                        [?MODULE, Job, Error, Stack]),
                     ok = resubmit_job(Job, Data, ?ERROR_RESCHEDULE_SEC),
                     exit({job_error, Error, Stack})
             end;
@@ -150,7 +145,6 @@ cleanup(true) ->
             timer:sleep(1000),
             ?MODULE:cleanup(is_enabled())
     end.
-
 
 
 resubmit_job(Job, Data, After) ->
@@ -164,12 +158,12 @@ resubmit_job(Job, Data, After) ->
 
 
 process_expirations(#{} = Job, #{} = Data) ->
-    % Maybe periodically update the job so it doesn't expire
     Callback = fun(Value, Acc) ->
         NewAcc = case Value of
             {meta, _} -> Acc;
             {row, DbInfo} ->
-                process_row(Acc, DbInfo);
+                TotalLen = length(Acc),
+                process_row(TotalLen, Acc, DbInfo);
             complete ->
                 TotalLen = length(Acc),
                 if TotalLen == 0 -> Acc; true ->
@@ -185,28 +179,26 @@ process_expirations(#{} = Job, #{} = Data) ->
     {ok, Job, Data}.
 
 
-process_row(Acc, DbInfo) ->
-    TotalLen = length(Acc),
-    case TotalLen of
-        0 ->
-            DbName = proplists:get_value(db_name, DbInfo),
-            TimeStamp = proplists:get_value(timestamp, DbInfo),
-            [{0, DbName, TimeStamp}];
+process_row(0, _Acc, DbInfo) ->
+    DbName = proplists:get_value(db_name, DbInfo),
+    TimeStamp = proplists:get_value(timestamp, DbInfo),
+    [{0, DbName, TimeStamp}];
+
+process_row(TotalLen, Acc, DbInfo) ->
+    [{LastDelete, _, _} | _] = Acc,
+    NumberToDelete = TotalLen - LastDelete,
+    DeleteBatch = expiration_batch(),
+    LastDelete2 = case NumberToDelete == DeleteBatch of
+        true ->
+            delete_dbs(lists:sublist(Acc, DeleteBatch)),
+            report_progress(TotalLen),
+            TotalLen;
         _ ->
-            [{LastDelete, _, _} | _] = Acc,
-            NumberToDelete = TotalLen - LastDelete,
-            DeleteBatch = expiration_batch(),
-            LastDelete2 = case NumberToDelete == DeleteBatch of
-                true ->
-                    delete_dbs(lists:sublist(Acc, DeleteBatch)),
-                    TotalLen;
-                _ ->
-                    LastDelete
-            end,
-            DbName = proplists:get_value(db_name, DbInfo),
-            TimeStamp = proplists:get_value(timestamp, DbInfo),
-            [{LastDelete2, DbName, TimeStamp} | Acc]
-    end.
+            LastDelete
+    end,
+    DbName = proplists:get_value(db_name, DbInfo),
+    TimeStamp = proplists:get_value(timestamp, DbInfo),
+    [{LastDelete2, DbName, TimeStamp} | Acc].
 
 
 delete_dbs(Infos) ->
@@ -214,13 +206,29 @@ delete_dbs(Infos) ->
         Now = now_sec(),
         Retention = retention_sec(),
         Since = Now - Retention,
-        case Since > timestamp_to_sec(TimeStamp)  of
+        case Since >= timestamp_to_sec(TimeStamp)  of
             true ->
                 ok = fabric2_db:delete(DbName, [{deleted_at, TimeStamp}]);
             false ->
                 ok
         end
     end, Infos).
+
+
+report_progress(TotalDbs) ->
+    % Update periodically the job so it doesn't expire
+    Now = now_sec(),
+    Progress = #{
+        <<"total_processed_dbs">> => TotalDbs,
+        <<"processed_at">> => Now
+
+    },
+    couch_jobs:update(undfined, ?JOB_TYPE, Progress).
+
+
+job_id() ->
+    JobVersion = job_version(),
+    <<?JOB_ID/binary, "-", JobVersion:16/integer>>.
 
 
 now_sec() ->
@@ -242,19 +250,24 @@ timestamp_to_sec(TimeStamp) ->
 
 
 is_enabled() ->
-    config:get_boolean("couch", "db_expiration_enabled", true).
+    config:get_boolean("couchdb", "db_expiration_enabled", false).
+
+
+job_version() ->
+    config:get_integer("couchdb", "db_expiration_job_version",
+        ?DEFAULT_JOB_Version).
 
 
 retention_sec() ->
-    config:get_integer("couch", "db_expiration_retention_sec",
+    config:get_integer("couchdb", "db_expiration_retention_sec",
         ?DEFAULT_RETENTION_SEC).
 
 
 schedule_sec() ->
-    config:get_integer("couch", "db_expiration_schedule_sec",
+    config:get_integer("couchdb", "db_expiration_schedule_sec",
         ?DEFAULT_SCHEDULE_SEC).
 
 
 expiration_batch() ->
-    config:get_integer("couch", "db_expiration_batch",
+    config:get_integer("couchdb", "db_expiration_batch",
         ?DEFAULT_EXPIRATION_BATCH).

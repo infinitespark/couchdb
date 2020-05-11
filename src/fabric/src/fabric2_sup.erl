@@ -24,16 +24,13 @@
 ]).
 
 
--include_lib("fabric/include/fabric2.hrl").
-
-
 start_link(Args) ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, Args).
 
 
 init([]) ->
     config:enable_feature(fdb),
-    Flags = {one_for_all, 1, 1}, % lowered for debugging
+    Flags = {one_for_all, 1, 5},
     Children = [
         {
             fabric2_server,
