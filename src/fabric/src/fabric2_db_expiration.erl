@@ -19,7 +19,9 @@
 -export([
     start_link/0,
     cleanup/1,
-    delete_dbs/1
+    delete_dbs/1,
+    process_expirations/2,
+    job_id/0
 ]).
 
 -export([
@@ -36,8 +38,6 @@
 -include_lib("fabric/include/fabric2.hrl").
 
 
--define(JOB_TYPE, <<"dbexpiration">>).
--define(JOB_ID, <<"dbexpiration_job">>).
 -define(DEFAULT_JOB_Version, 1).
 -define(DEFAULT_RETENTION_SEC, 172800). % 48 hours
 -define(DEFAULT_SCHEDULE_SEC, 3600). % 1 hour
@@ -75,7 +75,7 @@ handle_cast(Msg, St) ->
 
 handle_info(timeout, #st{job = undefined} = St) ->
     ok = wait_for_couch_jobs_app(),
-    ok = couch_jobs:set_type_timeout(?JOB_TYPE, ?JOB_TIMEOUT_SEC),
+    ok = couch_jobs:set_type_timeout(?DB_EXPIRATION_JOB_TYPE, ?JOB_TIMEOUT_SEC),
     ok = maybe_add_job(),
     Pid = spawn_link(?MODULE, cleanup, [is_enabled()]),
     {noreply, St#st{job = Pid}};
@@ -110,10 +110,10 @@ wait_for_couch_jobs_app() ->
 
 
 maybe_add_job() ->
-    case couch_jobs:get_job_data(undefined, ?JOB_TYPE, job_id()) of
+    case couch_jobs:get_job_data(undefined, ?DB_EXPIRATION_JOB_TYPE, job_id()) of
         {error, not_found} ->
             Now = erlang:system_time(second),
-            ok = couch_jobs:add(undefined, ?JOB_TYPE, job_id(), #{}, Now);
+            ok = couch_jobs:add(undefined, ?DB_EXPIRATION_JOB_TYPE, job_id(), #{}, Now);
         {ok, _JobData} ->
             ok
     end.
@@ -127,11 +127,11 @@ cleanup(true) ->
     Now = erlang:system_time(second),
     ScheduleSec = schedule_sec(),
     Opts = #{max_sched_time => Now + min(ScheduleSec div 3, 15)},
-    case couch_jobs:accept(?JOB_TYPE, Opts) of
+    case couch_jobs:accept(?DB_EXPIRATION_JOB_TYPE, Opts) of
         % maybe handle timeout here, need to check the api
         {ok, Job, Data} ->
             try
-                {ok, Job1, Data1} = process_expirations(Job, Data),
+                {ok, Job1, Data1} = fabric2_db_expiration:process_expirations(Job, Data),
                 ok = resubmit_job(Job1, Data1, schedule_sec())
             catch
                 _Tag:Error ->
@@ -142,7 +142,7 @@ cleanup(true) ->
                     exit({job_error, Error, Stack})
             end;
         {error, not_found} ->
-            timer:sleep(1000),
+            timer:sleep(?CHECK_ENABLED_SEC * 1000),
             ?MODULE:cleanup(is_enabled())
     end.
 
@@ -175,7 +175,11 @@ process_expirations(#{} = Job, #{} = Data) ->
         end,
         {ok, NewAcc}
     end,
-    {ok, _Infos} = fabric2_db:list_deleted_dbs_info(Callback, [], []),
+    {ok, _Infos} = fabric2_db:list_deleted_dbs_info(
+        Callback,
+        [],
+        [{restart_tx, true}]
+    ),
     {ok, Job, Data}.
 
 
@@ -223,12 +227,12 @@ report_progress(TotalDbs) ->
         <<"processed_at">> => Now
 
     },
-    couch_jobs:update(undfined, ?JOB_TYPE, Progress).
+    couch_jobs:update(undfined, ?DB_EXPIRATION_JOB_TYPE, Progress).
 
 
 job_id() ->
     JobVersion = job_version(),
-    <<?JOB_ID/binary, "-", JobVersion:16/integer>>.
+    <<?DB_EXPIRATION_JOB_ID/binary, "-", JobVersion:16/integer>>.
 
 
 now_sec() ->

@@ -82,3 +82,7 @@
 
 
 -define(DEFAULT_BINARY_CHUNK_SIZE, 100000).
+
+%
+-define(DB_EXPIRATION_JOB_TYPE, <<"db_expiration">>).
+-define(DB_EXPIRATION_JOB_ID, <<"db_expiration_job">>).
